@@ -750,9 +750,10 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
           onChanged: (value) async {
             if (value == null) return;
             await bind.sessionToggleOption(sessionId: sessionId, value: option);
-            // Only enable Meta key capture - pointer capture breaks normal input
-            // because it changes mouse events from absolute to relative coordinates
+            // Enable both Meta key capture and pointer capture
+            // Pointer capture uses relative deltas which are handled via localDelta
             await RdPlatformChannel.instance.setDexMetaCapture(value);
+            await RdPlatformChannel.instance.togglePointerCapture(value);
           },
           child: Text(translate('DeX Optimization'))));
     }

@@ -19,6 +19,11 @@ class RdPlatformChannel {
   // Main Flutter method channel for Android communication
   final MethodChannel _mainChannel = MethodChannel("mChannel");
 
+  // Track if pointer capture is currently active
+  // When true, mouse events should use localDelta instead of position
+  bool _pointerCaptureEnabled = false;
+  bool get pointerCaptureEnabled => _pointerCaptureEnabled;
+
   /// Bump the position of the mouse cursor, if applicable
   Future<bool> bumpMouse({required int dx, required int dy}) async {
     // No debug output; this call is too chatty.
@@ -60,11 +65,22 @@ class RdPlatformChannel {
     }
   }
 
-  // NOTE: Pointer capture (togglePointerCapture) was removed because it breaks
-  // normal mouse input. When pointer capture is enabled, Android delivers
-  // relative movement deltas instead of absolute coordinates, which Flutter's
-  // input system doesn't handle correctly. The DeX Meta key capture alone
-  // provides the primary value for remote desktop use cases.
+  /// Toggle pointer capture for immersive mouse control.
+  /// When enabled, the app receives raw relative mouse movements (deltas)
+  /// instead of absolute coordinates. The input handling code must use
+  /// PointerMoveEvent.localDelta instead of position when this is active.
+  /// 
+  /// Only works on Android 8.0+ (API 26+).
+  Future<void> togglePointerCapture(bool enable) async {
+    if (!isAndroid) return;
+    try {
+      await _mainChannel.invokeMethod('togglePointerCapture', enable);
+      _pointerCaptureEnabled = enable;
+    } on PlatformException catch (e) {
+      debugPrint("Failed to toggle pointer capture: '${e.message}'.");
+      _pointerCaptureEnabled = false;
+    }
+  }
   
   /// Check if Samsung DeX mode is currently enabled.
   /// Returns true if DeX is active, false otherwise.

@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:get/get.dart';
 
 import '../../models/model.dart';
@@ -1074,7 +1075,19 @@ class InputModel {
       _queryOtherWindowCoords = false;
     }
     if (isPhysicalMouse.value) {
-      handleMouse(_getMouseEvent(e, _kMouseEventMove), e.position, edgeScroll: useEdgeScroll);
+      // When pointer capture is active (DeX optimization), use relative delta
+      // similar to how touch mode works. This is because Android sends 
+      // relative movements via AXIS_RELATIVE_X/Y when pointer capture is enabled.
+      if (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled) {
+        // Use localDelta for relative mouse movement, similar to touch mode
+        final delta = e.localDelta;
+        if (delta.dx != 0 || delta.dy != 0) {
+          // Use updatePan with touchMode=true to handle as relative movement
+          parent.target?.cursorModel.updatePan(delta, e.localPosition, true);
+        }
+      } else {
+        handleMouse(_getMouseEvent(e, _kMouseEventMove), e.position, edgeScroll: useEdgeScroll);
+      }
     }
   }
 

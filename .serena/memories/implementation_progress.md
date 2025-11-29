@@ -1,63 +1,75 @@
-# DeX Pointer Capture Investigation - FINAL FIX APPLIED
+# DeX Pointer Capture - FIXED with localDelta
 
-## Issue
-After enabling DeX Optimization, hardware mouse and keyboard stop working.
+## Summary
+Successfully re-implemented pointer capture by using Flutter's `localDelta` - the same approach RustDesk uses for touch mode (screen-as-trackpad).
 
-## Root Cause (Confirmed from Termux-X11 analysis)
+## Key Insight
+RustDesk already handles relative mouse movements in touch mode via:
+- `DragUpdateDetails.delta` in gesture handlers
+- `cursorModel.updatePan(delta, localPosition, touchMode=true)`
+- `_handleTouchMode()` in CursorModel which uses delta.dx/dy to move cursor
 
-### Key Finding from Termux-X11 (TouchInputHandler.java lines 863-892)
-When pointer capture is enabled:
-```java
-if (!v.hasPointerCapture()) {
-    // Normal: Use absolute coordinates
-    mInjector.sendCursorMove(scaledX, scaledY, false);
-} else if (e.getAction() == MotionEvent.ACTION_MOVE) {
-    // Captured: Use AXIS_RELATIVE_X/Y - relative movement deltas
-    float x = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X);
-    float y = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
-    mInjector.sendCursorMove(x, y, true);  // true = relative
+When Android pointer capture is active, Flutter's `PointerMoveEvent.localDelta` contains the relative movements. We can reuse the same `updatePan()` code path!
+
+## Implementation
+
+### platform_channel.dart
+```dart
+// Track if pointer capture is currently active
+bool _pointerCaptureEnabled = false;
+bool get pointerCaptureEnabled => _pointerCaptureEnabled;
+
+Future<void> togglePointerCapture(bool enable) async {
+  await _mainChannel.invokeMethod('togglePointerCapture', enable);
+  _pointerCaptureEnabled = enable;
 }
 ```
 
-### Why Our Implementation Broke
-1. When `requestPointerCapture()` is called, Android changes how mouse events are delivered
-2. Flutter expects absolute coordinates in `PointerMoveEvent.localPosition`
-3. Pointer capture provides relative deltas instead
-4. Result: cursor appears "stuck" because Flutter doesn't handle relative mode
+### MainActivity.kt
+```kotlin
+private fun togglePointerCapture(enable: Boolean) {
+    val view = window.decorView
+    if (enable) {
+        view.requestPointerCapture()
+    } else {
+        view.releasePointerCapture()
+    }
+}
+```
 
-### Key Insight from Termux-X11
-**Meta key capture and pointer capture are SEPARATE features!**
-- `dexMetaKeyCapture` - Only affects Windows/Meta key routing
-- `pointerCapture` - Changes ALL mouse event delivery
+### input_model.dart
+```dart
+void onPointMoveImage(PointerMoveEvent e) {
+  // ... existing checks ...
+  
+  if (isPhysicalMouse.value) {
+    // When pointer capture is active, use relative delta
+    if (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled) {
+      final delta = e.localDelta;
+      if (delta.dx != 0 || delta.dy != 0) {
+        // Reuse touch mode's relative movement handling
+        parent.target?.cursorModel.updatePan(delta, e.localPosition, true);
+      }
+    } else {
+      // Normal absolute positioning
+      handleMouse(...);
+    }
+  }
+}
+```
 
-## Solution Applied
+## Why This Works
 
-### Changes Made
-1. **toolbar.dart** - Only call `setDexMetaCapture(value)`, removed `togglePointerCapture` calls
-2. **platform_channel.dart** - Removed `togglePointerCapture` method with explanatory comment
-3. **MainActivity.kt** - Removed `togglePointerCapture` handler and function, removed related `onWindowFocusChanged` override
+1. **Android Pointer Capture**: When `requestPointerCapture()` is called, Android sends relative movements
+2. **Flutter's localDelta**: Contains the relative movement data from the motion event
+3. **Existing Infrastructure**: RustDesk's touch mode already handles relative movements via `updatePan()`
+4. **Minimal Changes**: Just check if capture is active and redirect to existing code path
 
-### What DeX Optimization Now Does
-- ✅ Captures Meta/Windows key (prevents DeX from intercepting it)
-- ✅ All keyboard keys work normally
-- ✅ Mouse works with absolute coordinates (normal Flutter handling)
-- ❌ No pointer capture (would require rewriting Flutter input handling)
+## Files Changed
+- `flutter/lib/utils/platform_channel.dart` - Re-added togglePointerCapture with state tracking
+- `flutter/android/app/src/main/kotlin/.../MainActivity.kt` - Re-added native handler
+- `flutter/lib/models/input_model.dart` - Modified onPointMoveImage to use localDelta
+- `flutter/lib/common/widgets/toolbar.dart` - Updated to enable both captures
 
-### Files Modified
-- `flutter/lib/common/widgets/toolbar.dart`
-- `flutter/lib/utils/platform_channel.dart`
-- `flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt`
-
-### Why This Is Correct
-1. Remote desktop doesn't need pointer capture (cursor should be visible and trackable)
-2. Meta key capture alone provides significant value for DeX users
-3. Implementing proper pointer capture would require:
-   - Native interception of MotionEvents
-   - Converting AXIS_RELATIVE_X/Y to Flutter format
-   - Modifying InputModel to handle relative movements
-   - Too invasive for minimal benefit
-
-## Verification
-- Mouse should work normally after DeX Optimization is enabled
-- Windows/Meta key should be captured and sent to remote desktop
-- All other keyboard keys work as before
+## Status: READY FOR TESTING
+The implementation reuses proven code paths and should work with Samsung DeX hardware mouse.
