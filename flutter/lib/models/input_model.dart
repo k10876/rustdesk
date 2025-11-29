@@ -1050,7 +1050,12 @@ class InputModel {
       }
     }
     if (isPhysicalMouse.value) {
-      handleMouse(_getMouseEvent(e, _kMouseEventDown), e.position);
+      // When pointer capture is active, use cursor position from cursorModel
+      // because e.position may be inaccurate (fixed at center)
+      final position = (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled)
+          ? parent.target?.cursorModel.offset ?? e.position
+          : e.position;
+      handleMouse(_getMouseEvent(e, _kMouseEventDown), position);
     }
   }
 
@@ -1060,7 +1065,12 @@ class InputModel {
     if (isViewCamera) return;
     if (e.kind != ui.PointerDeviceKind.mouse) return;
     if (isPhysicalMouse.value) {
-      handleMouse(_getMouseEvent(e, _kMouseEventUp), e.position);
+      // When pointer capture is active, use cursor position from cursorModel
+      // because e.position may be inaccurate (fixed at center)
+      final position = (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled)
+          ? parent.target?.cursorModel.offset ?? e.position
+          : e.position;
+      handleMouse(_getMouseEvent(e, _kMouseEventUp), position);
     }
   }
 
