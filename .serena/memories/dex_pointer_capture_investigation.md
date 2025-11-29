@@ -1,84 +1,101 @@
-# DeX Pointer Capture Investigation - FINAL ANALYSIS
+# DeX Pointer Capture - Final Analysis with Moonlight Reference
 
-## Issue
-After enabling DeX Optimization, hardware mouse and keyboard stop working.
+## Summary
+Analyzed both termux-x11 and moonlight-android to understand proper pointer capture implementation.
 
-## Root Cause (Confirmed from Termux-X11 analysis)
+## Moonlight-Android Approach (Game.java + AndroidNativePointerCaptureProvider.java)
 
-### Key Finding from Termux-X11
-In termux-x11, **pointer capture** and **Meta key capture** are **SEPARATE optional features**:
+### How They Handle Pointer Capture
+1. **InputCaptureProvider abstraction** with multiple providers:
+   - `AndroidNativePointerCaptureProvider` - Uses Android O+ native pointer capture
+   - `ShieldCaptureProvider` - NVIDIA-specific
+   - `EvdevCaptureProvider` - Root-level device access
+   - `AndroidPointerIconCaptureProvider` - Just hides cursor, no actual capture
 
+2. **Event Processing (Game.java lines 1828-1842)**:
 ```java
-// TouchInputHandler.java line 398-409
-public void setCapturingEnabled(boolean enabled) {
-    if (mInjector.pointerCapture && enabled)  // pointerCapture is a SEPARATE setting
-        mActivity.getLorieView().requestPointerCapture();
-    else
-        mActivity.getLorieView().releasePointerCapture();
+if (inputCaptureProvider.eventHasRelativeMouseAxes(event)) {
+    // Send the deltas straight from the motion event
+    short deltaX = (short)inputCaptureProvider.getRelativeAxisX(event);
+    short deltaY = (short)inputCaptureProvider.getRelativeAxisY(event);
+    conn.sendMouseMove(deltaX, deltaY);
+}
+```
 
-    if (mInjector.pauseKeyInterceptingWithEsc) {
-        if (mInjector.dexMetaKeyCapture)  // dexMetaKeyCapture is also SEPARATE
-            SamsungDexUtils.dexMetaKeyCapture(mActivity, enabled);
-        keyIntercepting = enabled;
+3. **Relative Axis Detection (AndroidNativePointerCaptureProvider.java)**:
+```java
+public boolean eventHasRelativeMouseAxes(MotionEvent event) {
+    int eventSource = event.getSource();
+    return (eventSource == InputDevice.SOURCE_MOUSE_RELATIVE) ||
+           (eventSource == InputDevice.SOURCE_TOUCHPAD && targetView.hasPointerCapture());
+}
+
+public float getRelativeAxisX(MotionEvent event) {
+    int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
+            MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
+    return event.getAxisValue(axis);
+}
+```
+
+### Meta Key Capture (Game.java lines 675-702)
+```java
+public void setMetaKeyCaptureState(boolean enabled) {
+    Class<?> semWindowManager = Class.forName("com.samsung.android.view.SemWindowManager");
+    Method getInstanceMethod = semWindowManager.getMethod("getInstance");
+    Object manager = getInstanceMethod.invoke(null);
+    Method requestMetaKeyEventMethod = semWindowManager.getDeclaredMethod("requestMetaKeyEvent", ...);
+    requestMetaKeyEventMethod.invoke(manager, this.getComponentName(), enabled);
+}
+```
+
+### Key Insight from Moonlight
+They call BOTH together (line 1146 + 1159):
+```java
+private void setInputGrabState(boolean grab) {
+    if (grab) {
+        inputCaptureProvider.enableCapture();  // Pointer capture
+        // ...
     }
+    setMetaKeyCaptureState(grab);  // Meta key capture - SEPARATE call
 }
 ```
 
-### How Termux-X11 Handles Captured Pointer Events
-When pointer capture IS enabled, termux-x11 has special handling (line 863-901):
-```java
-if (!v.hasPointerCapture()) {
-    // Normal: Use absolute coordinates
-    mInjector.sendCursorMove(scaledX, scaledY, false);
-} else if (e.getAction() == MotionEvent.ACTION_MOVE) {
-    // Captured: Use AXIS_RELATIVE_X/Y
-    float x = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X);
-    float y = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
-    mInjector.sendCursorMove(x, y, true);  // true = relative
-}
-```
+## Why Flutter Can't Do Pointer Capture Like Moonlight/Termux-X11
 
-### Why Our Implementation Broke
-Our implementation combined both features into one toggle:
-- When "DeX Optimization" is enabled, we call BOTH:
-  1. `setDexMetaCapture(true)` - This is fine
-  2. `togglePointerCapture(true)` - THIS BREAKS FLUTTER
+### The Problem
+1. **Moonlight**: Native Java → MotionEvent → check source/axes → handle relative/absolute
+2. **RustDesk**: Native Java → Flutter Engine → Dart → Listener widget expects absolute coords
 
-Flutter's input system expects absolute coordinates from PointerMoveEvent.
-When pointer capture is enabled, Android sends relative deltas, but Flutter 
-still interprets them as absolute - resulting in "stuck" cursor.
+### What Would Be Required for Flutter Pointer Capture
+1. Intercept MotionEvents in MainActivity BEFORE Flutter gets them
+2. Convert AXIS_RELATIVE_X/Y to Flutter-compatible format
+3. Send through custom MethodChannel to Flutter
+4. Modify InputModel to handle relative movements
+5. Track cursor position manually in Dart
 
-## Solution
+This is a significant undertaking - essentially reimplementing Flutter's mouse handling.
 
-### Correct Approach: Keep Meta Key Capture, Remove Pointer Capture
+## Current Fix (Already Applied)
+Removed pointer capture, kept only Meta key capture:
+- ✅ Meta/Windows key captured and sent to remote
+- ✅ All keyboard keys work normally
+- ✅ Mouse works with standard absolute positioning
 
-**Why Meta Key Capture is Safe:**
-- Only affects the Windows/Meta/Command key routing
-- Doesn't change how other keyboard keys or mouse events are delivered
-- All regular key presses still work normally
+## Future Enhancement Path (If Needed)
+If pointer capture is truly needed in future:
 
-**Why Pointer Capture is Problematic:**
-- Changes ALL mouse events from absolute to relative
-- Flutter's input system doesn't handle this
-- Would require significant changes to input_model.dart
+1. **Option A**: Native mouse event interception
+   - Override `dispatchGenericMotionEvent()` in MainActivity
+   - When in capture mode, extract relative coords
+   - Send to Flutter via MethodChannel
+   - InputModel handles as relative movements
 
-### Files Modified
-1. `toolbar.dart` - Only call setDexMetaCapture, not togglePointerCapture
-2. `platform_channel.dart` - Remove togglePointerCapture method (unused)
-3. Keep MainActivity.kt handler for now (cleanup optional)
-4. Keep SamsungDexUtils unchanged (still used for Meta key)
+2. **Option B**: Switch to native Android UI for remote session
+   - Like Moonlight, use SurfaceView for rendering
+   - Handle all input natively
+   - Major architectural change
 
-## Verification
-The fix removes pointer capture while keeping Meta key capture:
-- Meta/Windows key will be sent to remote desktop
-- Mouse and keyboard will work normally
-- No changes needed to Flutter input handling
-
-## Alternative (Future Enhancement)
-If pointer capture is desired in future, would need:
-1. Native interception of MotionEvents in MainActivity
-2. Convert relative deltas to Flutter-compatible format
-3. Send through method channel as custom events
-4. Handle in InputModel with special relative mode
-
-This is complex and not worth it for current use case.
+## Files for Reference
+- `/tmp/moonlight-android-ref/app/src/main/java/com/limelight/Game.java`
+- `/tmp/moonlight-android-ref/app/src/main/java/com/limelight/binding/input/capture/AndroidNativePointerCaptureProvider.java`
+- `/tmp/termux-x11-ref/app/src/main/java/com/termux/x11/input/TouchInputHandler.java`
