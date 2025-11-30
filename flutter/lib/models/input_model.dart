@@ -1093,7 +1093,7 @@ class InputModel {
         final delta = e.localDelta;
         if (delta.dx != 0 || delta.dy != 0) {
           // Use updatePan with touchMode=true to handle as relative movement
-          parent.target?.cursorModel.updatePan(delta, e.localPosition, true);
+          parent.target?.cursorModel.updatePan(delta, e.localPosition, false);
         }
       } else {
         handleMouse(_getMouseEvent(e, _kMouseEventMove), e.position, edgeScroll: useEdgeScroll);
