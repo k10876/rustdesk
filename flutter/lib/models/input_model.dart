@@ -377,6 +377,22 @@ class InputModel {
 
   InputModel(this.parent) {
     sessionId = parent.target!.sessionId;
+    // Register callback for relative mouse movement from native pointer capture
+    if (isAndroid) {
+      RdPlatformChannel.instance.relativeMouseMoveCallback = _onRelativeMouseMoved;
+    }
+  }
+
+  /// Handle relative mouse movement from native pointer capture.
+  /// Called when Android's dispatchGenericMotionEvent intercepts captured mouse events.
+  void _onRelativeMouseMoved(double dx, double dy) {
+    if (isViewOnly && !showMyCursor) return;
+    if (isViewCamera) return;
+    if (dx == 0 && dy == 0) return;
+    
+    // Use updatePan to move the cursor relatively, similar to touch mode
+    final delta = Offset(dx, dy);
+    parent.target?.cursorModel.updatePan(delta, Offset.zero, true);
   }
 
   // This function must be called after the peer info is received.
@@ -1085,19 +1101,15 @@ class InputModel {
       _queryOtherWindowCoords = false;
     }
     if (isPhysicalMouse.value) {
-      // When pointer capture is active (DeX optimization), use relative delta
-      // similar to how touch mode works. This is because Android sends 
-      // relative movements via AXIS_RELATIVE_X/Y when pointer capture is enabled.
+      // When pointer capture is active (DeX optimization), mouse movement is handled
+      // via _onRelativeMouseMoved callback from native dispatchGenericMotionEvent.
+      // Flutter's Listener doesn't receive ACTION_MOVE events with SOURCE_MOUSE_RELATIVE,
+      // so we skip processing here when pointer capture is enabled.
       if (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled) {
-        // Use localDelta for relative mouse movement, similar to touch mode
-        final delta = e.localDelta;
-        if (delta.dx != 0 || delta.dy != 0) {
-          // Use updatePan with touchMode=true to handle as relative movement
-          parent.target?.cursorModel.updatePan(delta, e.localPosition, false);
-        }
-      } else {
-        handleMouse(_getMouseEvent(e, _kMouseEventMove), e.position, edgeScroll: useEdgeScroll);
+        // Movement handled by native layer via on_relative_mouse_move MethodChannel
+        return;
       }
+      handleMouse(_getMouseEvent(e, _kMouseEventMove), e.position, edgeScroll: useEdgeScroll);
     }
   }
 

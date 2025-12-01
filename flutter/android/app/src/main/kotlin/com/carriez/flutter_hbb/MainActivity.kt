@@ -18,6 +18,8 @@ import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
@@ -46,6 +48,9 @@ class MainActivity : FlutterActivity() {
     private val channelTag = "mChannel"
     private val logTag = "mMainActivity"
     private var mainService: MainService? = null
+
+    // Track if pointer capture is enabled for DeX optimization
+    private var _pointerCaptureEnabled = false
 
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
@@ -429,9 +434,10 @@ class MainActivity : FlutterActivity() {
     /**
      * Toggle pointer capture for immersive mouse control.
      * When enabled, the app receives raw relative mouse movements via AXIS_RELATIVE_X/Y.
-     * Flutter's input handling must use PointerMoveEvent.localDelta when this is active.
+     * We intercept these in dispatchGenericMotionEvent and forward to Flutter via MethodChannel.
      */
     private fun togglePointerCapture(enable: Boolean) {
+        _pointerCaptureEnabled = enable
         val view = window.decorView
         if (enable) {
             view.requestPointerCapture()
@@ -442,10 +448,36 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * Intercept motion events to handle captured pointer (relative mouse movement).
+     * When pointer capture is enabled, mouse movement events with SOURCE_MOUSE_RELATIVE
+     * don't reach Flutter's Listener widget. We intercept them here and forward via MethodChannel.
+     */
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (_pointerCaptureEnabled && 
+            event.action == MotionEvent.ACTION_MOVE &&
+            (event.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            
+            val relativeX = event.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+            val relativeY = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+            
+            if (relativeX != 0f || relativeY != 0f) {
+                // Send relative movement to Flutter via MethodChannel
+                flutterMethodChannel?.invokeMethod("on_relative_mouse_move", mapOf(
+                    "dx" to relativeX.toDouble(),
+                    "dy" to relativeY.toDouble()
+                ))
+                return true  // Consume the event
+            }
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus) {
             // Automatically release pointer capture when window loses focus
+            _pointerCaptureEnabled = false
             window.decorView.releasePointerCapture()
         }
     }

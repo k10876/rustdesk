@@ -1,86 +1,68 @@
-# DeX Pointer Capture - COMPLETE Implementation
+# DeX Pointer Capture - FIXED with Native Event Interception
 
-## Summary
-Successfully implemented full pointer capture with proper handling for:
-- Mouse movement (relative deltas via localDelta)
-- Mouse button clicks (all buttons including side buttons)
-- Scroll wheel
+## Problem
+The previous implementation using Flutter's `e.localDelta` didn't work because:
+- When pointer capture is enabled via `requestPointerCapture()`, Android sends mouse events with `SOURCE_MOUSE_RELATIVE`
+- Flutter's Listener widget does NOT receive `ACTION_MOVE` events with this source
+- This causes "silence" in the logs - no mouse movement events reach Flutter
 
-## Key Insight
-RustDesk's touch mode already handles relative mouse movements via `cursorModel.updatePan()`.
-When pointer capture is active, we can reuse this infrastructure.
+## Solution
+Intercept mouse events in the Android native layer and forward them via MethodChannel:
 
-## Implementation Details
-
-### Mouse Movement (onPointMoveImage)
-When pointer capture is active:
-```dart
-if (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled) {
-  final delta = e.localDelta;
-  if (delta.dx != 0 || delta.dy != 0) {
-    parent.target?.cursorModel.updatePan(delta, e.localPosition, true);
-  }
+### MainActivity.kt
+1. Added `_pointerCaptureEnabled` flag to track pointer capture state
+2. Override `dispatchGenericMotionEvent` to intercept captured mouse events:
+```kotlin
+override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+    if (_pointerCaptureEnabled && 
+        event.action == MotionEvent.ACTION_MOVE &&
+        (event.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+        
+        val relativeX = event.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+        val relativeY = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+        
+        if (relativeX != 0f || relativeY != 0f) {
+            flutterMethodChannel?.invokeMethod("on_relative_mouse_move", mapOf(
+                "dx" to relativeX.toDouble(),
+                "dy" to relativeY.toDouble()
+            ))
+            return true  // Consume the event
+        }
+    }
+    return super.dispatchGenericMotionEvent(event)
 }
 ```
-- Uses `e.localDelta` which contains relative movement from Android
-- Calls `cursorModel.updatePan()` which updates `_x` and `_y` internally
-- Same code path as touch mode
 
-### Mouse Button Clicks (onPointDownImage, onPointUpImage)
-When pointer capture is active, `e.position` may be inaccurate (fixed at center).
-Solution: Use the cursor position tracked by cursorModel:
-```dart
-final position = (isAndroid && RdPlatformChannel.instance.pointerCaptureEnabled)
-    ? parent.target?.cursorModel.offset ?? e.position
-    : e.position;
-handleMouse(_getMouseEvent(e, _kMouseEventDown), position);
-```
-- `cursorModel.offset` returns `Offset(_x, _y)` - the tracked cursor position
-- `_getMouseEvent()` handles button mapping (left, right, middle, back, forward)
-- `handleMouse()` sends the button event at the correct position
+### platform_channel.dart
+1. Added `RelativeMouseMoveCallback` typedef
+2. Added `_relativeMouseMoveCallback` property
+3. Added method call handler to receive `on_relative_mouse_move` from Android
+4. Constructor now sets up the method call handler
 
-### Scroll Wheel (onPointerSignalImage)
-No changes needed - scroll events just send deltas, not position:
-```dart
-bind.sessionSendMouse(sessionId: sessionId,
-    msg: '{"type": "wheel", "x": "$dx", "y": "$dy"}');
-```
+### input_model.dart
+1. Added `_onRelativeMouseMoved(double dx, double dy)` method to handle native events
+2. Constructor registers callback with `RdPlatformChannel.instance.relativeMouseMoveCallback`
+3. Removed ineffective `e.localDelta` logic in `onPointMoveImage`
+4. `onPointMoveImage` now returns early when pointer capture is active (movement handled by native layer)
+
+## Data Flow
+1. User moves physical mouse with pointer capture enabled
+2. Android sends `ACTION_MOVE` event with `AXIS_RELATIVE_X/Y`
+3. `dispatchGenericMotionEvent` intercepts the event in MainActivity
+4. Native code invokes `on_relative_mouse_move` on MethodChannel
+5. `RdPlatformChannel._handleMethodCall` receives the call
+6. Callback `_onRelativeMouseMoved` is invoked in InputModel
+7. `cursorModel.updatePan(delta, Offset.zero, true)` moves the cursor
+
+## Button Clicks
+Mouse button clicks still work via Flutter's Listener:
+- `onPointDownImage` and `onPointUpImage` continue to use `cursorModel.offset` for position
+- Buttons are not affected by pointer capture
 
 ## Files Changed
-
-### Native Android (Kotlin)
-1. **common.kt** - SamsungDexUtils object for Meta key capture
-2. **MainActivity.kt** - MethodChannel handlers:
-   - `setDexMetaCapture` - Enable/disable Meta key capture
-   - `togglePointerCapture` - Enable/disable pointer capture
-   - `isDexEnabled` - Check DeX mode status
-
-### Flutter (Dart)
-3. **platform_channel.dart**
-   - `_pointerCaptureEnabled` state tracking
-   - `pointerCaptureEnabled` getter
-   - `togglePointerCapture()` method
-
-4. **input_model.dart**
-   - `onPointMoveImage()` - Uses localDelta when capture active
-   - `onPointDownImage()` - Uses cursorModel.offset when capture active
-   - `onPointUpImage()` - Uses cursorModel.offset when capture active
-
-5. **toolbar.dart** - Enables both captures on DeX Optimization toggle
-6. **setting_widgets.dart** - DeX Optimization checkbox in settings
-7. **consts.dart** - kOptionEnableDexOptimization constant
-
-### Translations
-8. **template.rs**, **en.rs**, **cn.rs** - "DeX Optimization" strings
-
-## Button Support
-All mouse buttons work when pointer capture is active:
-- ✅ Left click (kPrimaryMouseButton)
-- ✅ Right click (kSecondaryMouseButton)
-- ✅ Middle click (kMiddleMouseButton)
-- ✅ Back button (kBackMouseButton)
-- ✅ Forward button (kForwardMouseButton)
-- ✅ Scroll wheel
+1. **MainActivity.kt** - Added `dispatchGenericMotionEvent` override and `_pointerCaptureEnabled` flag
+2. **platform_channel.dart** - Added method call handler and callback mechanism
+3. **input_model.dart** - Added `_onRelativeMouseMoved`, removed `e.localDelta` logic
 
 ## Status: READY FOR TESTING
-Complete implementation with full mouse button support.
+Implementation uses native event interception as recommended in PROBLEM_DESC.md
