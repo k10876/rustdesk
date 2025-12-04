@@ -389,7 +389,7 @@ class InputModel {
     if (isViewOnly && !showMyCursor) return;
     if (isViewCamera) return;
     if (dx == 0 && dy == 0) return;
-    
+
     // Use updatePan to move the cursor relatively, similar to touch mode
     final delta = Offset(dx, dy);
     parent.target?.cursorModel.updatePan(delta, Offset.zero, true);
