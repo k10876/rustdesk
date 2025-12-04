@@ -1,101 +1,83 @@
-# DeX Pointer Capture - Final Analysis with Moonlight Reference
+# DeX Pointer Capture - Final Implementation
 
 ## Summary
-Analyzed both termux-x11 and moonlight-android to understand proper pointer capture implementation.
+Implemented captured pointer handling as per Android documentation:
+https://developer.android.com/develop/ui/views/touch-and-input/gestures/movement#pointer-capture
 
-## Moonlight-Android Approach (Game.java + AndroidNativePointerCaptureProvider.java)
+## Implementation in MainActivity.kt
 
-### How They Handle Pointer Capture
-1. **InputCaptureProvider abstraction** with multiple providers:
-   - `AndroidNativePointerCaptureProvider` - Uses Android O+ native pointer capture
-   - `ShieldCaptureProvider` - NVIDIA-specific
-   - `EvdevCaptureProvider` - Root-level device access
-   - `AndroidPointerIconCaptureProvider` - Just hides cursor, no actual capture
-
-2. **Event Processing (Game.java lines 1828-1842)**:
-```java
-if (inputCaptureProvider.eventHasRelativeMouseAxes(event)) {
-    // Send the deltas straight from the motion event
-    short deltaX = (short)inputCaptureProvider.getRelativeAxisX(event);
-    short deltaY = (short)inputCaptureProvider.getRelativeAxisY(event);
-    conn.sendMouseMove(deltaX, deltaY);
+### 1. OnCapturedPointerListener (Recommended by Android Docs)
+```kotlin
+private fun togglePointerCapture(enable: Boolean) {
+    _pointerCaptureEnabled = enable
+    val view = window.decorView
+    if (enable) {
+        // Set up the captured pointer listener as per Android docs
+        view.setOnCapturedPointerListener { v, event ->
+            if (event.action == MotionEvent.ACTION_MOVE) {
+                val relativeX = event.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+                val relativeY = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+                
+                if (relativeX != 0f || relativeY != 0f) {
+                    flutterMethodChannel?.invokeMethod("on_relative_mouse_move", mapOf(
+                        "dx" to relativeX.toDouble(),
+                        "dy" to relativeY.toDouble()
+                    ))
+                    return@setOnCapturedPointerListener true
+                }
+            }
+            false
+        }
+        view.requestPointerCapture()
+    } else {
+        view.setOnCapturedPointerListener(null)
+        view.releasePointerCapture()
+    }
 }
 ```
 
-3. **Relative Axis Detection (AndroidNativePointerCaptureProvider.java)**:
+### 2. dispatchGenericMotionEvent (Fallback)
+Also kept as fallback, now properly checks for SOURCE_MOUSE_RELATIVE:
+```kotlin
+override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+    if (_pointerCaptureEnabled && event.action == MotionEvent.ACTION_MOVE) {
+        val source = event.source
+        // Check for SOURCE_MOUSE_RELATIVE (when pointer capture is active)
+        val isCapturedMouse = (source == InputDevice.SOURCE_MOUSE_RELATIVE) ||
+                               ((source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE && 
+                                window.decorView.hasPointerCapture())
+        
+        if (isCapturedMouse) {
+            // Forward AXIS_RELATIVE_X/Y to Flutter
+            ...
+        }
+    }
+    return super.dispatchGenericMotionEvent(event)
+}
+```
+
+## Data Flow
+1. User moves physical mouse with pointer capture enabled
+2. Android's `OnCapturedPointerListener` receives the event (primary path)
+3. OR `dispatchGenericMotionEvent` intercepts it (fallback)
+4. Native code extracts `AXIS_RELATIVE_X` and `AXIS_RELATIVE_Y`
+5. Native invokes `on_relative_mouse_move` on MethodChannel
+6. `RdPlatformChannel._handleMethodCall` receives the call
+7. Calls `_relativeMouseMoveCallback` which is `InputModel._onRelativeMouseMoved`
+8. `cursorModel.updatePan(delta, Offset.zero, true)` moves the cursor relatively
+
+## Key Points from Android Docs
+- When pointer capture is enabled, events use `SOURCE_MOUSE_RELATIVE`
+- `AXIS_RELATIVE_X` and `AXIS_RELATIVE_Y` contain the relative movement
+- `OnCapturedPointerListener` is the recommended approach
+- `dispatchGenericMotionEvent` can be used as fallback
+
+## Moonlight Reference
+They check for both sources:
 ```java
 public boolean eventHasRelativeMouseAxes(MotionEvent event) {
     int eventSource = event.getSource();
     return (eventSource == InputDevice.SOURCE_MOUSE_RELATIVE) ||
            (eventSource == InputDevice.SOURCE_TOUCHPAD && targetView.hasPointerCapture());
 }
-
-public float getRelativeAxisX(MotionEvent event) {
-    int axis = (event.getSource() == InputDevice.SOURCE_MOUSE_RELATIVE) ?
-            MotionEvent.AXIS_X : MotionEvent.AXIS_RELATIVE_X;
-    return event.getAxisValue(axis);
-}
 ```
-
-### Meta Key Capture (Game.java lines 675-702)
-```java
-public void setMetaKeyCaptureState(boolean enabled) {
-    Class<?> semWindowManager = Class.forName("com.samsung.android.view.SemWindowManager");
-    Method getInstanceMethod = semWindowManager.getMethod("getInstance");
-    Object manager = getInstanceMethod.invoke(null);
-    Method requestMetaKeyEventMethod = semWindowManager.getDeclaredMethod("requestMetaKeyEvent", ...);
-    requestMetaKeyEventMethod.invoke(manager, this.getComponentName(), enabled);
-}
-```
-
-### Key Insight from Moonlight
-They call BOTH together (line 1146 + 1159):
-```java
-private void setInputGrabState(boolean grab) {
-    if (grab) {
-        inputCaptureProvider.enableCapture();  // Pointer capture
-        // ...
-    }
-    setMetaKeyCaptureState(grab);  // Meta key capture - SEPARATE call
-}
-```
-
-## Why Flutter Can't Do Pointer Capture Like Moonlight/Termux-X11
-
-### The Problem
-1. **Moonlight**: Native Java → MotionEvent → check source/axes → handle relative/absolute
-2. **RustDesk**: Native Java → Flutter Engine → Dart → Listener widget expects absolute coords
-
-### What Would Be Required for Flutter Pointer Capture
-1. Intercept MotionEvents in MainActivity BEFORE Flutter gets them
-2. Convert AXIS_RELATIVE_X/Y to Flutter-compatible format
-3. Send through custom MethodChannel to Flutter
-4. Modify InputModel to handle relative movements
-5. Track cursor position manually in Dart
-
-This is a significant undertaking - essentially reimplementing Flutter's mouse handling.
-
-## Current Fix (Already Applied)
-Removed pointer capture, kept only Meta key capture:
-- ✅ Meta/Windows key captured and sent to remote
-- ✅ All keyboard keys work normally
-- ✅ Mouse works with standard absolute positioning
-
-## Future Enhancement Path (If Needed)
-If pointer capture is truly needed in future:
-
-1. **Option A**: Native mouse event interception
-   - Override `dispatchGenericMotionEvent()` in MainActivity
-   - When in capture mode, extract relative coords
-   - Send to Flutter via MethodChannel
-   - InputModel handles as relative movements
-
-2. **Option B**: Switch to native Android UI for remote session
-   - Like Moonlight, use SurfaceView for rendering
-   - Handle all input natively
-   - Major architectural change
-
-## Files for Reference
-- `/tmp/moonlight-android-ref/app/src/main/java/com/limelight/Game.java`
-- `/tmp/moonlight-android-ref/app/src/main/java/com/limelight/binding/input/capture/AndroidNativePointerCaptureProvider.java`
-- `/tmp/termux-x11-ref/app/src/main/java/com/termux/x11/input/TouchInputHandler.java`
