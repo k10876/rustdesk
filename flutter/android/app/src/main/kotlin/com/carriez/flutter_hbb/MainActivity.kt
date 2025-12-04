@@ -18,6 +18,9 @@ import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
@@ -46,6 +49,9 @@ class MainActivity : FlutterActivity() {
     private val channelTag = "mChannel"
     private val logTag = "mMainActivity"
     private var mainService: MainService? = null
+
+    // Track if pointer capture is enabled for DeX optimization
+    private var _pointerCaptureEnabled = false
 
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
@@ -273,6 +279,25 @@ class MainActivity : FlutterActivity() {
                 "on_voice_call_closed" -> {
                     onVoiceCallClosed()
                 }
+                "setDexMetaCapture" -> {
+                    if (call.arguments is Boolean) {
+                        setDexMetaCapture(call.arguments as Boolean)
+                        result.success(null)
+                    } else {
+                        result.success(false)
+                    }
+                }
+                "togglePointerCapture" -> {
+                    if (call.arguments is Boolean) {
+                        togglePointerCapture(call.arguments as Boolean)
+                        result.success(null)
+                    } else {
+                        result.success(false)
+                    }
+                }
+                "isDexEnabled" -> {
+                    result.success(SamsungDexUtils.isDexEnabled(this))
+                }
                 else -> {
                     result.error("-1", "No such method", null)
                 }
@@ -396,6 +421,89 @@ class MainActivity : FlutterActivity() {
                 "text" to "Failed to stop voice call."))
         } else {
             Log.d(logTag, "onVoiceCallClosed success")
+        }
+    }
+
+    /**
+     * Enable or disable Samsung DeX Meta key capture.
+     * Delegates to SamsungDexUtils in common.kt.
+     */
+    private fun setDexMetaCapture(enable: Boolean) {
+        SamsungDexUtils.setMetaKeyCapture(this, enable)
+    }
+
+    /**
+     * Send relative mouse movement to Flutter via MethodChannel.
+     * Extracts AXIS_RELATIVE_X/Y from the event and forwards to Flutter.
+     * Returns true if movement was sent (non-zero delta), false otherwise.
+     */
+    private fun sendRelativeMouseMove(event: MotionEvent): Boolean {
+        val relativeX = event.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+        val relativeY = event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+
+        if (relativeX != 0f || relativeY != 0f) {
+            flutterMethodChannel?.invokeMethod("on_relative_mouse_move", mapOf(
+                "dx" to relativeX.toDouble(),
+                "dy" to relativeY.toDouble()
+            ))
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Toggle pointer capture for immersive mouse control.
+     * When enabled, the app receives raw relative mouse movements via AXIS_RELATIVE_X/Y.
+     * Uses OnCapturedPointerListener as recommended by Android documentation:
+     * https://developer.android.com/develop/ui/views/touch-and-input/gestures/movement#pointer-capture
+     */
+    private fun togglePointerCapture(enable: Boolean) {
+        _pointerCaptureEnabled = enable
+        val view = window.decorView
+        if (enable) {
+            // Set up the captured pointer listener as per Android docs
+            view.setOnCapturedPointerListener { _, event ->
+                if (event.action == MotionEvent.ACTION_MOVE) {
+                    sendRelativeMouseMove(event)
+                } else {
+                    false
+                }
+            }
+            view.requestPointerCapture()
+            Log.d(logTag, "Pointer capture enabled with OnCapturedPointerListener")
+        } else {
+            view.setOnCapturedPointerListener(null)
+            view.releasePointerCapture()
+            Log.d(logTag, "Pointer capture released")
+        }
+    }
+
+    /**
+     * Fallback: Intercept motion events for captured pointer (relative mouse movement).
+     * This is a fallback in case OnCapturedPointerListener doesn't receive events.
+     * Checks for SOURCE_MOUSE_RELATIVE which is the source when pointer capture is active.
+     */
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (_pointerCaptureEnabled && event.action == MotionEvent.ACTION_MOVE) {
+            val source = event.source
+            // When pointer capture is enabled, source becomes SOURCE_MOUSE_RELATIVE
+            val isCapturedMouse = (source == InputDevice.SOURCE_MOUSE_RELATIVE) ||
+                                   ((source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE &&
+                                    window.decorView.hasPointerCapture())
+
+            if (isCapturedMouse && sendRelativeMouseMove(event)) {
+                return true  // Consume the event
+            }
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) {
+            // Automatically release pointer capture when window loses focus
+            _pointerCaptureEnabled = false
+            window.decorView.releasePointerCapture()
         }
     }
 

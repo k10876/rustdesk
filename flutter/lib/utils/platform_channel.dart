@@ -5,9 +5,15 @@ import 'package:flutter_hbb/common.dart';
 
 enum SystemWindowTheme { light, dark }
 
+// Callback type for relative mouse movement from native pointer capture
+typedef RelativeMouseMoveCallback = void Function(double dx, double dy);
+
 /// The platform channel for RustDesk.
 class RdPlatformChannel {
-  RdPlatformChannel._();
+  RdPlatformChannel._() {
+    // Set up method call handler for incoming calls from native side
+    _mainChannel.setMethodCallHandler(_handleMethodCall);
+  }
 
   static final RdPlatformChannel _windowUtil = RdPlatformChannel._();
 
@@ -15,6 +21,37 @@ class RdPlatformChannel {
 
   final MethodChannel _hostMethodChannel =
       MethodChannel("org.rustdesk.rustdesk/host");
+
+  // Main Flutter method channel for Android communication
+  final MethodChannel _mainChannel = MethodChannel("mChannel");
+
+  // Track if pointer capture is currently active
+  // When true, mouse events are handled via on_relative_mouse_move from native
+  bool _pointerCaptureEnabled = false;
+  bool get pointerCaptureEnabled => _pointerCaptureEnabled;
+
+  // Callback for relative mouse movement events from native pointer capture
+  RelativeMouseMoveCallback? _relativeMouseMoveCallback;
+
+  /// Set the callback for relative mouse movement events.
+  /// Called when native pointer capture sends movement deltas.
+  set relativeMouseMoveCallback(RelativeMouseMoveCallback? callback) {
+    _relativeMouseMoveCallback = callback;
+  }
+
+  /// Handle incoming method calls from native side
+  Future<dynamic> _handleMethodCall(MethodCall call) async {
+    switch (call.method) {
+      case 'on_relative_mouse_move':
+        final args = call.arguments as Map<Object?, Object?>;
+        final dx = (args['dx'] as num).toDouble();
+        final dy = (args['dy'] as num).toDouble();
+        _relativeMouseMoveCallback?.call(dx, dy);
+        return null;
+      default:
+        throw MissingPluginException('Not implemented: ${call.method}');
+    }
+  }
 
   /// Bump the position of the mouse cursor, if applicable
   Future<bool> bumpMouse({required int dx, required int dy}) async {
@@ -41,5 +78,49 @@ class RdPlatformChannel {
   Future<void> terminate() {
     assert(isMacOS);
     return _hostMethodChannel.invokeMethod("terminate");
+  }
+
+  /// Enable or disable Samsung DeX Meta (Windows/Command) key capture.
+  /// When enabled, Meta key events will be sent to the app instead of
+  /// being intercepted by the system.
+  /// 
+  /// Only works on Samsung devices with DeX mode.
+  Future<void> setDexMetaCapture(bool enable) async {
+    if (!isAndroid) return;
+    try {
+      await _mainChannel.invokeMethod('setDexMetaCapture', enable);
+    } on PlatformException catch (e) {
+      debugPrint("Failed to set DeX meta capture: '${e.message}'.");
+    }
+  }
+
+  /// Toggle pointer capture for immersive mouse control.
+  /// When enabled, the app receives raw relative mouse movements (deltas)
+  /// instead of absolute coordinates. The input handling code must use
+  /// PointerMoveEvent.localDelta instead of position when this is active.
+  /// 
+  /// Only works on Android 8.0+ (API 26+).
+  Future<void> togglePointerCapture(bool enable) async {
+    if (!isAndroid) return;
+    try {
+      await _mainChannel.invokeMethod('togglePointerCapture', enable);
+      _pointerCaptureEnabled = enable;
+    } on PlatformException catch (e) {
+      debugPrint("Failed to toggle pointer capture: '${e.message}'.");
+      _pointerCaptureEnabled = false;
+    }
+  }
+  
+  /// Check if Samsung DeX mode is currently enabled.
+  /// Returns true if DeX is active, false otherwise.
+  Future<bool> isDexEnabled() async {
+    if (!isAndroid) return false;
+    try {
+      final result = await _mainChannel.invokeMethod('isDexEnabled');
+      return result as bool? ?? false;
+    } catch (e) {
+      debugPrint("Failed to check DeX status: '$e'.");
+      return false;
+    }
   }
 }

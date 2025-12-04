@@ -10,6 +10,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:get/get.dart';
 
 bool isEditOsPassword = false;
@@ -735,6 +736,27 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
           ffiModel.setViewOnly(id, value);
         },
         child: Text(translate('View Mode'))));
+  }
+  
+  // DeX optimization (Android only)
+  if (isDefaultConn && isAndroid) {
+    final dexEnabled = await RdPlatformChannel.instance.isDexEnabled();
+    if (dexEnabled) {
+      final option = kOptionEnableDexOptimization;
+      final value =
+          bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
+      v.add(TToggleMenu(
+          value: value,
+          onChanged: (value) async {
+            if (value == null) return;
+            await bind.sessionToggleOption(sessionId: sessionId, value: option);
+            // Enable both Meta key capture and pointer capture
+            // Pointer capture uses relative deltas which are handled via localDelta
+            await RdPlatformChannel.instance.setDexMetaCapture(value);
+            await RdPlatformChannel.instance.togglePointerCapture(value);
+          },
+          child: Text(translate('DeX Optimization'))));
+    }
   }
   return v;
 }
